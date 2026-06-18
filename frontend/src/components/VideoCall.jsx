@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import Peer from 'peerjs';
 import { io } from 'socket.io-client';
 
-const VideoCall = ({ myUserId, peerUserId, userId }) => {
+const VideoCall = ({ myUserId, userId }) => {
   const [myStream, setMyStream] = useState(null);
   const [peerStream, setPeerStream] = useState(null);
   const [peerId, setPeerId] = useState(null);
@@ -11,6 +11,7 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [isCalling, setIsCalling] = useState(false);
+
   const [chatMessages, setChatMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [chatRoom, setChatRoom] = useState(null);
@@ -24,82 +25,81 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
   const chatMessagesRef = useRef(null);
 
   useEffect(() => {
-    navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    }).then((stream) => {
-      setMyStream(stream);
-      if (myVideoRef.current) {
-        myVideoRef.current.srcObject = stream;
-      }
-
-      const peer = new Peer(myUserId, {
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-          ],
-        },
-        debug: 1,
-      });
-
-      peerRef.current = peer;
-
-      peer.on('open', (id) => {
-        console.log('My peer ID is: ' + id);
-        setPeerId(id);
-
-        if (userId) {
-          fetch('/api/peer/update-peer-id', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: { userId, peerId: id }
-          });
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then((stream) => {
+        setMyStream(stream);
+        if (myVideoRef.current) {
+          myVideoRef.current.srcObject = stream;
         }
 
-        fetchAvailableUsers(userId);
-      });
+        const peer = new Peer(myUserId, {
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+            ],
+          },
+          debug: 1,
+        });
 
-      peer.on('call', (call) => {
-        call.answer(stream);
-        currentCallRef.current = call;
-        setIsCalling(true);
-        setChatRoom(`${call.peer}-${id}`);
+        peerRef.current = peer;
 
-        setupSocket(call.peer, id);
+        peer.on('open', (id) => {
+          setPeerId(id);
 
-        call.on('stream', (userStream) => {
-          setPeerStream(userStream);
-          if (peerVideoRef.current) {
-            peerVideoRef.current.srcObject = userStream;
+          if (userId) {
+            fetch('/api/peer/update-peer-id', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId, peerId: id })
+            });
           }
+
+          fetchAvailableUsers(userId);
         });
 
-        call.on('close', () => {
-          endCall();
+        // ✅ FIXED: removed undefined `id`
+        peer.on('call', (call) => {
+          call.answer(stream);
+
+          currentCallRef.current = call;
+          setIsCalling(true);
+
+          const roomId = `${call.peer}-${myUserId}`;
+          setChatRoom(roomId);
+
+          setupSocket(call.peer, myUserId);
+
+          call.on('stream', (userStream) => {
+            setPeerStream(userStream);
+            if (peerVideoRef.current) {
+              peerVideoRef.current.srcObject = userStream;
+            }
+          });
+
+          call.on('close', endCall);
+          call.on('error', (err) => {
+            console.error('Call error:', err);
+            endCall();
+          });
         });
 
-        call.on('error', (err) => {
-          console.error('Call error:', err);
-          endCall();
+        peer.on('error', (err) => {
+          console.error('PeerJS Error:', err);
         });
+
+      })
+      .catch((err) => {
+        console.error('Media access error:', err);
+        alert('Please allow camera and microphone access');
       });
-
-      peer.on('error', (err) => {
-        console.error('PeerJS Error:', err);
-      });
-    }).catch((err) => {
-      console.error('Media access error:', err);
-      alert('Please allow camera and microphone access');
-    });
   }, [myUserId, userId]);
 
   const setupSocket = (callerPeerId, peerPeerId) => {
-    const socket = io('http://localhost:5000');
+    const socket = io('https://skillexchange-backend-dnjr.onrender.com');
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('Socket connected:', socket.id);
       socket.emit('join-chat', {
         callerId: callerPeerId,
         peerId: peerPeerId
@@ -108,7 +108,6 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
 
     socket.on('receive-message', (data) => {
       setChatMessages(prev => [...prev, data]);
-      scrollToBottom();
     });
 
     socket.on('user-joined', (data) => {
@@ -126,10 +125,6 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
         timestamp: new Date().toISOString()
       }]);
     });
-
-    socket.on('disconnect', () => {
-      console.log('Socket disconnected');
-    });
   };
 
   const fetchAvailableUsers = async (currentUserId) => {
@@ -138,18 +133,16 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
       const data = await res.json();
       setAvailableUsers(data.users);
     } catch (error) {
-      console.error('Error fetching users:', error);
+      console.error(error);
     }
   };
 
   const callPeer = () => {
-    if (!callerId || !myStream) {
-      alert('Please enter a Peer ID and ensure camera/mic are enabled');
-      return;
-    }
+    if (!callerId || !myStream) return;
 
     const call = peerRef.current.call(callerId, myStream);
     currentCallRef.current = call;
+
     setIsCalling(true);
     setChatRoom(`${myUserId}-${callerId}`);
 
@@ -162,12 +155,9 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
       }
     });
 
-    call.on('close', () => {
-      endCall();
-    });
-
+    call.on('close', endCall);
     call.on('error', (err) => {
-      console.error('Call error:', err);
+      console.error(err);
       endCall();
     });
   };
@@ -177,56 +167,34 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
       currentCallRef.current.close();
       currentCallRef.current = null;
     }
-    
+
     if (socketRef.current) {
       socketRef.current.disconnect();
       socketRef.current = null;
     }
-    
+
     setIsCalling(false);
     setPeerStream(null);
     setChatMessages([]);
     setChatRoom(null);
-    
+
     if (peerVideoRef.current) {
       peerVideoRef.current.srcObject = null;
     }
   };
 
   const toggleAudio = () => {
-    if (myStream) {
-      myStream.getAudioTracks().forEach(track => {
-        track.enabled = !audioEnabled;
-      });
-      setAudioEnabled(!audioEnabled);
-    }
+    myStream?.getAudioTracks().forEach(track => {
+      track.enabled = !audioEnabled;
+    });
+    setAudioEnabled(!audioEnabled);
   };
 
   const toggleVideo = () => {
-    if (myStream) {
-      myStream.getVideoTracks().forEach(track => {
-        track.enabled = !videoEnabled;
-      });
-      setVideoEnabled(!videoEnabled);
-    }
-  };
-
-  const stopCallAndMedia = () => {
-    endCall();
-    
-    if (myStream) {
-      myStream.getTracks().forEach(track => {
-        track.stop();
-      });
-      setMyStream(null);
-    }
-    
-    if (myVideoRef.current) {
-      myVideoRef.current.srcObject = null;
-    }
-    
-    setAudioEnabled(true);
-    setVideoEnabled(true);
+    myStream?.getVideoTracks().forEach(track => {
+      track.enabled = !videoEnabled;
+    });
+    setVideoEnabled(!videoEnabled);
   };
 
   const sendMessage = () => {
@@ -234,7 +202,7 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
 
     socketRef.current.emit('send-message', {
       room: chatRoom,
-      message: newMessage.trim(),
+      message: newMessage,
       senderId: myUserId,
       timestamp: new Date().toISOString()
     });
@@ -242,341 +210,55 @@ const VideoCall = ({ myUserId, peerUserId, userId }) => {
     setNewMessage('');
   };
 
-  const scrollToBottom = () => {
-    if (chatMessagesRef.current) {
-      chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
-    }
-  };
-
-  const formatTime = (timestamp) => {
-    return new Date(timestamp).toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
-
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', maxWidth: '1200px', margin: '0 auto' }}>
-      <h2>🎥 Live Video Call with Chat</h2>
-      
-      <div style={{ display: 'flex', gap: '20px', marginBottom: '20px', flexWrap: 'wrap', justifyContent: 'center', width: '100%' }}>
-        {/* Video Section */}
-        <div style={{ flex: '1', minWidth: '320px', maxWidth: '640px' }}>
-          <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', justifyContent: 'center' }}>
-            <div>
-              <h3>📹 My Video</h3>
-              <video 
-                ref={myVideoRef} 
-                autoPlay 
-                muted 
-                playsInline
-                style={{ 
-                  width: '300px', 
-                  height: '225px', 
-                  border: '2px solid #333',
-                  borderRadius: '8px'
-                }}
-              />
-            </div>
-            
-            <div>
-              <h3>👤 Peer Video</h3>
-              <video 
-                ref={peerVideoRef} 
-                autoPlay 
-                playsInline
-                style={{ 
-                  width: '300px', 
-                  height: '225px', 
-                  border: '2px solid #333',
-                  borderRadius: '8px',
-                  backgroundColor: peerStream ? 'transparent' : '#f0f0f0'
-                }}
-              />
-              {!peerStream && (
-                <div style={{ textAlign: 'center', color: '#666', marginTop: '100px' }}>
-                  No peer video
-                </div>
-              )}
-            </div>
-          </div>
+    <div>
+      <h2>Video Call</h2>
 
-          {/* Control Buttons */}
-          {isCalling && (
-            <div style={{ 
-              display: 'flex', 
-              gap: '15px', 
-              marginTop: '20px',
-              justifyContent: 'center',
-              flexWrap: 'wrap'
-            }}>
-              <button 
-                onClick={toggleAudio}
-                style={{ 
-                  padding: '12px 24px', 
-                  backgroundColor: audioEnabled ? '#28a745' : '#dc3545', 
-                  color: 'white', 
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px'
-                }}
-              >
-                {audioEnabled ? '🔊 Audio On' : '🔇 Audio Off'}
-              </button>
+      <video ref={myVideoRef} autoPlay muted width="300" />
+      <video ref={peerVideoRef} autoPlay width="300" />
 
-              <button 
-                onClick={toggleVideo}
-                style={{ 
-                  padding: '12px 24px', 
-                  backgroundColor: videoEnabled ? '#28a745' : '#dc3545', 
-                  color: 'white', 
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px'
-                }}
-              >
-                {videoEnabled ? '📷 Video On' : '📵 Video Off'}
-              </button>
-
-              <button 
-                onClick={() => setShowChat(!showChat)}
-                style={{ 
-                  padding: '12px 24px', 
-                  backgroundColor: '#007bff', 
-                  color: 'white', 
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px'
-                }}
-              >
-                {showChat ? '📵 Hide Chat' : '💬 Show Chat'}
-              </button>
-
-              <button 
-                onClick={stopCallAndMedia}
-                style={{ 
-                  padding: '12px 24px', 
-                  backgroundColor: '#dc3545', 
-                  color: 'white', 
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px'
-                }}
-              >
-                🛑 End Call & Stop
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Chat Section */}
-        {showChat && isCalling && (
-          <div style={{ 
-            flex: '1', 
-            minWidth: '320px', 
-            maxWidth: '400px',
-            backgroundColor: '#f8f9fa',
-            borderRadius: '8px',
-            border: '1px solid #ddd',
-            display: 'flex',
-            flexDirection: 'column',
-            height: '500px'
-          }}>
-            <div style={{ 
-              padding: '15px', 
-              backgroundColor: '#007bff', 
-              color: 'white',
-              borderRadius: '8px 8px 0 0',
-              fontSize: '16px',
-              fontWeight: 'bold'
-            }}>
-              💬 Chat
-            </div>
-            
-            <div 
-              ref={chatMessagesRef}
-              style={{ 
-                padding: '15px',
-                overflowY: 'auto',
-                flex: '1',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '10px'
-              }}
-            >
-              {chatMessages.length === 0 && (
-                <div style={{ textAlign: 'center', color: '#666', marginTop: '100px' }}>
-                  No messages yet
-                </div>
-              )}
-              
-              {chatMessages.map((msg, index) => (
-                <div 
-                  key={index}
-                  style={{
-                    backgroundColor: msg.senderId === 'system' ? '#e9ecef' : msg.isMe ? '#d4edda' : '#f8d7da',
-                    padding: '10px',
-                    borderRadius: '8px',
-                    alignSelf: msg.isMe ? 'flex-end' : 'flex-start',
-                    maxWidth: '85%'
-                  }}
-                >
-                  {msg.senderId !== 'system' && (
-                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '5px' }}>
-                      {msg.isMe ? 'You' : 'Peer'}
-                    </div>
-                  )}
-                  <div>{msg.message}</div>
-                  <div style={{ fontSize: '11px', color: '#999', marginTop: '5px', textAlign: 'right' }}>
-                    {formatTime(msg.timestamp)}
-                  </div>
-                </div>
-              ))}
-            </div>
-            
-            <div style={{ 
-              padding: '15px', 
-              borderTop: '1px solid #ddd',
-              display: 'flex',
-              gap: '10px'
-            }}>
-              <input
-                type="text"
-                placeholder="Type a message..."
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                style={{
-                  flex: '1',
-                  padding: '10px',
-                  border: '1px solid #ddd',
-                  borderRadius: '6px',
-                  fontSize: '14px'
-                }}
-              />
-              <button 
-                onClick={sendMessage}
-                disabled={!newMessage.trim()}
-                style={{
-                  padding: '10px 20px',
-                  backgroundColor: newMessage.trim() ? '#28a745' : '#6c757d',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  cursor: newMessage.trim() ? 'pointer' : 'not-allowed'
-                }}
-              >
-                Send
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Call Input */}
       {!isCalling && (
-        <div style={{ marginBottom: '20px', display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
+        <div>
           <input
-            type="text"
-            placeholder="Enter Peer ID to call"
             value={callerId}
             onChange={(e) => setCallerId(e.target.value)}
-            style={{ 
-              padding: '12px', 
-              width: '280px', 
-              border: '1px solid #ddd',
-              borderRadius: '8px',
-              fontSize: '14px'
-            }}
+            placeholder="Peer ID"
           />
-          <button 
-            onClick={callPeer}
-            style={{ 
-              padding: '12px 24px', 
-              backgroundColor: '#28a745', 
-              color: 'white', 
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '14px'
-            }}
-          >
-            📞 Call
+          <button onClick={callPeer}>Call</button>
+        </div>
+      )}
+
+      {isCalling && (
+        <div>
+          <button onClick={toggleAudio}>Audio</button>
+          <button onClick={toggleVideo}>Video</button>
+          <button onClick={endCall}>End</button>
+          <button onClick={() => setShowChat(!showChat)}>
+            Chat
           </button>
         </div>
       )}
 
-      {/* Available Users */}
-      {availableUsers.length > 0 && (
-        <div style={{ 
-          marginBottom: '20px', 
-          width: '100%', 
-          maxWidth: '600px',
-          backgroundColor: '#f8f9fa',
-          padding: '15px',
-          borderRadius: '8px'
-        }}>
-          <h3 style={{ marginTop: 0 }}>👥 Available Users to Call:</h3>
-          {availableUsers.map((user) => (
-            <div key={user._id} style={{ 
-              margin: '10px 0',
-              padding: '10px',
-              backgroundColor: 'white',
-              borderRadius: '6px',
-              border: '1px solid #ddd'
-            }}>
-              <strong style={{ color: '#007bff' }}>{user.name}</strong>
-              <br />
-              <small style={{ color: '#666' }}>Skills: {user.skills.join(', ')}</small>
-              <br />
-              <small style={{ color: '#999' }}>Location: {user.location || 'Not set'}</small>
-              <br />
-              <button 
-                onClick={() => setCallerId(user.peerId)}
-                style={{ 
-                  padding: '6px 12px', 
-                  backgroundColor: '#007bff', 
-                  color: 'white', 
-                  border: 'none',
-                  borderRadius: '4px',
-                  marginTop: '5px',
-                  cursor: 'pointer'
-                }}
-              >
-                ✅ Set as Peer
-              </button>
-              <small style={{ marginLeft: '10px', color: '#666' }}>
-                Peer ID: {user.peerId}
-              </small>
-            </div>
-          ))}
+      {showChat && (
+        <div>
+          <div style={{ height: 200, overflow: 'auto' }}>
+            {chatMessages.map((msg, i) => (
+              <div key={i}>
+                <b>{msg.senderId}:</b> {msg.message}
+              </div>
+            ))}
+          </div>
+
+          <input
+            value={newMessage}
+            onChange={(e) => setNewMessage(e.target.value)}
+          />
+          <button onClick={sendMessage}>Send</button>
         </div>
       )}
 
-      {/* Info */}
-      <div style={{ 
-        textAlign: 'center', 
-        backgroundColor: '#e9ecef', 
-        padding: '15px',
-        borderRadius: '8px',
-        width: '100%',
-        maxWidth: '600px'
-      }}>
-        <p style={{ margin: '5px 0' }}>
-          Your Peer ID: <strong style={{ color: '#007bff' }}>{peerId}</strong>
-        </p>
-        <p style={{ margin: '5px 0', fontSize: '13px', color: '#666' }}>
-          Share this with others to receive calls
-        </p>
-        {isCalling && (
-          <p style={{ margin: '5px 0', fontSize: '13px', color: '#28a745' }}>
-            ✅ Call in progress | 💬 Chat active
-          </p>
-        )}
+      <div>
+        <p>My Peer ID: {peerId}</p>
       </div>
     </div>
   );
