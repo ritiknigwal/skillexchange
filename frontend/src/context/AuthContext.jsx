@@ -1,6 +1,6 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import axios from 'axios';
-axios.defaults.baseURL = 'http://localhost:5001';
+axios.defaults.baseURL = 'https://skillexchange-backend-dnjr.onrender.com';
 
 const AuthContext = createContext();
 
